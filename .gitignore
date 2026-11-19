@@ -1,0 +1,20 @@
+# Track implementation source and its notices; keep release builds local.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/src/
+!/licenses/
+
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.zip
+*.app/
+*.so
+*.dylib
+*.marshal

@@ -1,0 +1,226 @@
+--- a/src_c/alphablit.c
++++ b/src_c/alphablit.c
+@@ -82,6 +82,8 @@
+     SDL_BlendMode    dst_blend;
+ #endif /* IS_SDLv2 */
+ } SDL_BlitInfo;
++
++#include "arm64_blit.h"
+ 
+ static void alphablit_alpha (SDL_BlitInfo * info);
+ 
+@@ -3266,6 +3268,10 @@
+ static void
+ alphablit_alpha (SDL_BlitInfo * info)
+ {
++#if IS_SDLv2 && defined(__aarch64__) && SDL_BYTEORDER == SDL_LIL_ENDIAN
++    if (atc_blit_alpha_arm64(info))
++        return;
++#endif
+     int             n;
+     int             width = info->width;
+     int             height = info->height;
+--- a/src_c/display.c
++++ b/src_c/display.c
+@@ -25,6 +25,7 @@
+  */
+ #define PYGAMEAPI_DISPLAY_INTERNAL
+ #include "pygame.h"
++#include "endless_atc_retina.h"
+ 
+ #include "pgcompat.h"
+ #include "pgopengl.h"
+@@ -494,8 +495,8 @@
+     }
+     else {
+         if (SDL_GetCurrentDisplayMode(0, &mode) == 0) {
+-            info->current_w = mode.w;
+-            info->current_h = mode.h;
++            info->current_w = mode.w * pg_retina_startup_scale();
++            info->current_h = mode.h * pg_retina_startup_scale();
+             formatenum = mode.format;
+         }
+         else {
+@@ -1118,8 +1119,20 @@
+            avoid changing the physical resolution. This used to default
+            to the max supported by the monitor, but we can use current
+            desktop resolution without breaking compatibility. */
+-            w = display_mode.w;
+-            h = display_mode.h;
++            w = display_mode.w * pg_retina_startup_scale();
++            h = display_mode.h * pg_retina_startup_scale();
++        }
++
++        if (pg_retina_enabled() && !(flags & (PGS_SCALED | PGS_OPENGL))) {
++            sdl_flags |= SDL_WINDOW_ALLOW_HIGHDPI;
++            if (win) {
++                pg_retina_translate(win, &w, &h, 0);
++            }
++            else {
++                int scale = pg_retina_startup_scale();
++                w = (w + scale - 1) / scale;
++                h = (h + scale - 1) / scale;
++            }
+         }
+ 
+         if (flags & PGS_FULLSCREEN) {
+@@ -2012,7 +2025,7 @@
+     if (pg_renderer != NULL) {
+         return pg_flip(self);
+     }
+-    SDL_GetWindowSize(win, &wide, &high);
++    SDL_GetWindowSizeInPixels(win, &wide, &high);
+ 
+     if (state->using_gl)
+         return RAISE(pgExc_SDLError, "Cannot update an OPENGL display");
+--- a/src_c/event.c
++++ b/src_c/event.c
+@@ -26,6 +26,7 @@
+ #define PYGAMEAPI_EVENT_INTERNAL
+ 
+ #include "pygame.h"
++#include "endless_atc_retina.h"
+ 
+ #include "pgcompat.h"
+ 
+@@ -1078,13 +1079,16 @@
+             _pg_insobj(dict, "state", PyInt_FromLong(event->active.state));
+             break;
+ #else /* IS_SDLv2 */
+-        case SDL_VIDEORESIZE:
+-            obj = Py_BuildValue("(ii)", event->window.data1,
+-                                event->window.data2);
++        case SDL_VIDEORESIZE: {
++            int width = event->window.data1, height = event->window.data2;
++            pg_retina_translate(SDL_GetWindowFromID(event->window.windowID),
++                                &width, &height, 1);
++            obj = Py_BuildValue("(ii)", width, height);
+             _pg_insobj(dict, "size", obj);
+-            _pg_insobj(dict, "w", PyInt_FromLong(event->window.data1));
+-            _pg_insobj(dict, "h", PyInt_FromLong(event->window.data2));
+-            break;
++            _pg_insobj(dict, "w", PyInt_FromLong(width));
++            _pg_insobj(dict, "h", PyInt_FromLong(height));
++            break;
++        }
+         case SDL_ACTIVEEVENT:
+             switch (event->window.event) {
+                 case SDL_WINDOWEVENT_ENTER:
+@@ -1128,11 +1132,16 @@
+             _pg_insobj(dict, "mod", PyInt_FromLong(event->key.keysym.mod));
+             _pg_insobj(dict, "scancode", PyInt_FromLong(event->key.keysym.scancode));
+             break;
+-        case SDL_MOUSEMOTION:
+-            obj = Py_BuildValue("(ii)", event->motion.x, event->motion.y);
+-            _pg_insobj(dict, "pos", obj);
+-            obj =
+-                Py_BuildValue("(ii)", event->motion.xrel, event->motion.yrel);
++        case SDL_MOUSEMOTION: {
++            int x = event->motion.x, y = event->motion.y;
++            int dx = event->motion.xrel, dy = event->motion.yrel;
++#if IS_SDLv2
++            SDL_Window *window = SDL_GetWindowFromID(event->motion.windowID);
++            pg_retina_translate(window, &x, &y, 1);
++            pg_retina_translate(window, &dx, &dy, 1);
++#endif
++            _pg_insobj(dict, "pos", Py_BuildValue("(ii)", x, y));
++            obj = Py_BuildValue("(ii)", dx, dy);
+             _pg_insobj(dict, "rel", obj);
+             if ((tuple = PyTuple_New(3))) {
+                 PyTuple_SET_ITEM(tuple, 0,
+@@ -1152,9 +1161,14 @@
+                 PyBool_FromLong((event->motion.which == SDL_TOUCH_MOUSEID)));
+ #endif
+             break;
++        }
+         case SDL_MOUSEBUTTONDOWN:
+-        case SDL_MOUSEBUTTONUP:
+-            obj = Py_BuildValue("(ii)", event->button.x, event->button.y);
++        case SDL_MOUSEBUTTONUP: {
++            int x = event->button.x, y = event->button.y;
++#if IS_SDLv2
++            pg_retina_translate(SDL_GetWindowFromID(event->button.windowID), &x, &y, 1);
++#endif
++            obj = Py_BuildValue("(ii)", x, y);
+             _pg_insobj(dict, "pos", obj);
+             _pg_insobj(dict, "button", PyInt_FromLong(event->button.button));
+ #if !IS_SDLv1
+@@ -1163,6 +1177,7 @@
+                 PyBool_FromLong((event->button.which == SDL_TOUCH_MOUSEID)));
+ #endif
+             break;
++        }
+         case SDL_JOYAXISMOTION:
+             _pg_insobj(dict, "joy", _joy_map_instance(event->jaxis.which));
+             _pg_insobj(dict, "instance_id", PyInt_FromLong(event->jaxis.which));
+@@ -1838,7 +1853,21 @@
+                     /* no events */
+                     return 0;
+                 }
++#if IS_SDLv2
++                /* Leave the event queued for Pygame's window-event translator.
++                 * SDL's Cocoa backend blocks on its native event source. */
++                {
++                    int remaining = -1;
++                    if (timeout >= 0) {
++                        remaining = (Sint32)(finish - SDL_GetTicks());
++                        if (remaining <= 0)
++                            return 0;
++                    }
++                    SDL_WaitEventTimeout(NULL, remaining);
++                }
++#else
+                 SDL_Delay(1);
++#endif
+         }
+     }
+ }
+--- a/src_c/mouse.c
++++ b/src_c/mouse.c
+@@ -24,6 +24,7 @@
+  *  pygame mouse module
+  */
+ #include "pygame.h"
++#include "endless_atc_retina.h"
+ 
+ #include "pgcompat.h"
+ 
+@@ -62,6 +63,7 @@
+         }
+     }
+ 
++    pg_retina_translate(pg_GetDefaultWindow(), &x, &y, 0);
+     SDL_WarpMouseInWindow(NULL, (Uint16)x, (Uint16)y);
+ #endif /* IS_SDLv2 */
+     Py_RETURN_NONE;
+@@ -104,6 +106,9 @@
+     }
+ #endif
+ 
++#if IS_SDLv2
++    pg_retina_translate(pg_GetDefaultWindow(), &x, &y, 1);
++#endif
+     return Py_BuildValue("(ii)", x, y);
+ }
+ 
+@@ -115,6 +120,9 @@
+     VIDEO_INIT_CHECK();
+ 
+     SDL_GetRelativeMouseState(&x, &y);
++#if IS_SDLv2
++    pg_retina_translate(pg_GetDefaultWindow(), &x, &y, 1);
++#endif
+ 
+ /*
+ #if IS_SDLv2
+--- a/src_c/include/pgcompat.h
++++ b/src_c/include/pgcompat.h
+@@ -130,7 +130,7 @@
+ #define SDL_WINDOW_FOREIGN 0
+ #endif
+ 
+-#ifndef SDL_WINDOW_ALLOW_HIGHDPI
++#if !SDL_VERSION_ATLEAST(2, 0, 1) /* SDL2 exposes this as an enum */
+ #define SDL_WINDOW_ALLOW_HIGHDPI 0
+ #endif
+ 
